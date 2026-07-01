@@ -1,0 +1,16 @@
+# Large data files
+data/candidates.jsonl
+*.npy
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Sentence-transformers / HuggingFace model cache
+.cache/
+models/
+~/.cache/huggingface/
+sentence_transformers/
