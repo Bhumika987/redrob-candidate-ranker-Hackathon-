@@ -39,6 +39,7 @@ from scorer import (
 )
 
 TOP_N = 100
+_SCORE_DECIMALS = 4   # must match the format string used when writing the CSV
 
 # ---------------------------------------------------------------------------
 # ML / AI skill terms used to select the most relevant skills for reasoning.
@@ -84,10 +85,17 @@ def _cid_num(cid: str) -> int:
 
 def _heap_key(r: dict) -> tuple:
     """
-    Sort key: higher score = better; equal scores -> lower candidate_id = better.
-    Stored as (score, -cid_num) so Python's min-heap places the worst entry at [0].
+    Sort key for the min-heap: higher score = better; equal scores → lower cid = better.
+    Stored as (rounded_score, -cid_num) so heap[0] is always the worst of the top-N.
+
+    IMPORTANT: score is rounded to _SCORE_DECIMALS here so that two candidates
+    whose raw scores differ only past the 4th decimal place are treated as tied
+    and the secondary cid_num key breaks the tie consistently.  Without rounding,
+    a pair that both appear as "0.7904" in the CSV could sort in cid-descending
+    order because their unrounded scores were fractionally different.
     """
-    return (r["total_score"], -_cid_num(r["candidate_id"]))
+    rounded = round(r["total_score"], _SCORE_DECIMALS)
+    return (rounded, -_cid_num(r["candidate_id"]))
 
 
 # ---------------------------------------------------------------------------
@@ -429,17 +437,31 @@ def main() -> None:
     heap, n_scored, score_elapsed = _stream_score_top_n(candidates_path, TOP_N)
 
     # ── Step 3: Extract top-100, enforce tie-break sort ──────────────────────
-    # Sort descending on (score, -cid_num): higher score = rank 1;
-    # equal scores -> lower cid_num (ascending candidate_id) = better rank.
-    top100 = sorted(heap, key=lambda x: x[0], reverse=True)
+    # Single compound sort: total_score DESC (primary), candidate_id ASC (secondary).
+    # Both keys use the same rounded score that will appear in the CSV, so two rows
+    # that look tied in the output are guaranteed to satisfy the tie-break here.
+    top100 = sorted(
+        heap,
+        key=lambda x: (
+            -round(x[2]["total_score"], _SCORE_DECIMALS),
+            _cid_num(x[2]["candidate_id"]),
+        ),
+    )
 
-    # Sanity: scores must be non-increasing
-    scores = [entry[0][0] for entry in top100]
-    for i in range(len(scores) - 1):
-        assert scores[i] >= scores[i + 1], (
-            f"BUG: score at rank {i+1} ({scores[i]:.4f}) < "
-            f"rank {i+2} ({scores[i+1]:.4f})"
+    # Sanity: CSV scores must be non-increasing and tie-break must hold.
+    for i in range(len(top100) - 1):
+        s_a = round(top100[i][2]["total_score"], _SCORE_DECIMALS)
+        s_b = round(top100[i + 1][2]["total_score"], _SCORE_DECIMALS)
+        assert s_a >= s_b, (
+            f"BUG: score at rank {i+1} ({s_a:.4f}) < rank {i+2} ({s_b:.4f})"
         )
+        if s_a == s_b:
+            cid_a = _cid_num(top100[i][2]["candidate_id"])
+            cid_b = _cid_num(top100[i + 1][2]["candidate_id"])
+            assert cid_a < cid_b, (
+                f"BUG: tie at rank {i+1}/{i+2} but cid {cid_a} >= {cid_b} "
+                f"(should be ascending)"
+            )
 
     # ── Step 4: Write CSV ────────────────────────────────────────────────────
     print(f"Generating reasoning and writing {out_path} ...", flush=True)
